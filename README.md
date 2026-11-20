@@ -35,7 +35,7 @@ Build an optimal portfolio that splits capital across three markets so that **Va
 ### Roadmap
 
 - [x] **Stage 1:** GARCH model fit and volatility estimation for each index: NIFTY 50, S&P 500 and Euro Stoxx 50
-- [ ] **Stage 2:** Model how correlation between the three markets changes over time (DCC-GARCH)
+- [x] **Stage 2:** Model how correlation between the three markets changes over time (DCC-GARCH, in `dynamic-portfolio.ipynb` and `validation.ipynb`)
 - [x] **Stage 3:** Minimum-VaR portfolio for a target annual return, built once on the training data (`portoflio.ipynb`)
 - [ ] **Stage 4:** Model volatility for each **constituent** of the indices, not only the indices themselves
 - [x] **Stage 5:** Dynamic portfolio rebalancing as risk estimates change (`dynamic-portfolio.ipynb`)
@@ -318,7 +318,8 @@ The same $10,000 and the same 8% target as Stage 3, but the portfolio is **re-op
 ```python
 REBALANCE_FREQ       = "M"            # "W", "M" or "Q"
 REFIT_GARCH          = True           # re-estimate GARCH parameters at every rebalance
-CORR_WINDOW          = 500            # trading days of residuals for correlations (None = expanding)
+CORR_MODEL           = "dcc"          # "dcc" (DCC-GARCH) or "rolling"
+CORR_WINDOW          = 500            # days of residuals for rolling correlations
 RETURN_WINDOW        = None           # expanding-window expected returns
 IF_INFEASIBLE        = "max_return"   # what to do if no mix can reach the target
 TRANSACTION_COST_BPS = 0.0
@@ -332,7 +333,7 @@ Only data up to that day's close is used:
 |:--|:--|:--|
 | GARCH parameters | fitted once, to 2017 | re-estimated each month on all data to date |
 | Volatility forecast | average over 2018–2025, made in Dec 2017 | average over the next month, made that day |
-| Correlations | training-period residuals | last 500 trading days of residuals |
+| Correlations | training-period residuals | **DCC-GARCH**, re-estimated each month, forecast over the next month and updated daily |
 | Expected returns | training-period mean | mean of all returns to date |
 | Weights | set once, then drift | reset to the new optimum each month |
 
@@ -340,55 +341,148 @@ If no long-only mix can reach the target, the portfolio moves to the index with 
 
 The same engine with no rebalancing reproduces Stage 3 exactly ($25,339). This confirms that the two notebooks are directly comparable.
 
+### DCC-GARCH correlations
+
+DCC (Dynamic Conditional Correlation; Engle, 2002) makes the correlation between markets change over time. It is built from the GARCH standardised residuals $z_t$:
+
+$$Q_t = (1-a-b)\,\bar Q + a\,z_{t-1}z_{t-1}^\top + b\,Q_{t-1}, \qquad R_t = \text{diag}(Q_t)^{-1/2}\,Q_t\,\text{diag}(Q_t)^{-1/2}$$
+
+- $a$ is how strongly correlations react to a joint shock, and $b$ is how long that reaction persists.
+- $a$ and $b$ are estimated by two-step maximum likelihood on all residuals to date. The `arch` package has no DCC model, so it is implemented by hand.
+- For planning, the forecast correlation is averaged over the coming month. During the month, $R_t$ is updated daily, so the VaR reacts as soon as markets start moving together.
+
+| Pair | DCC mean | DCC range, 2018–2025 | Rolling 500-day mean |
+|:--|--:|--:|--:|
+| NIFTY–S&P | 0.24 | 0.07 – 0.49 | 0.23 |
+| NIFTY–Euro Stoxx | 0.38 | 0.22 – 0.60 | 0.37 |
+| S&P–Euro Stoxx | 0.58 | 0.35 – 0.73 | 0.54 |
+
+The estimates are $a$ = 0.014–0.023 and $a + b$ = 0.945–0.982. On the training data, DCC improves the log-likelihood over constant correlation by 16 points (LR ≈ 33, 2 degrees of freedom).
+
 ### Results (8% target, monthly rebalancing)
 
-**Average allocation:** 48% NIFTY 50, 43% S&P 500, 8% Euro Stoxx 50. Average one-way turnover was about 20% per month.
+**Average allocation:** 49% NIFTY 50, 44% S&P 500, 8% Euro Stoxx 50. Average one-way turnover was about 20% per month.
 
-| $10,000 invested 2018–2025 | Dynamic | Static | 100% NIFTY 50 | 100% S&P 500 | 100% Euro Stoxx 50 |
-|:--|--:|--:|--:|--:|--:|
-| **Return** | | | | | |
-| Final value | $24,861 | $25,339 | $24,813 | **$25,604** | $16,542 |
-| Annualised return | 11.7% | 12.0% | 11.7% | **12.1%** | 6.3% |
-| Worst calendar year | −5.5% | −11.9% | **+3.2%** | −19.4% | −14.8% |
-| **Risk** | | | | | |
-| Average forecast 99% VaR | **1.89%** | 2.08% | 2.34% | 2.58% | 2.78% |
-| Average forecast 99% VaR ($) | **$271** | $310 | $352 | $383 | $311 |
-| Actual worst 1% of days | **2.47%** | 2.56% | 2.67% | 3.41% | 3.64% |
-| Annualised volatility | **14.3%** | 15.2% | 16.6% | 19.3% | 18.6% |
-| Worst single day | **$861** | $1,049 | $1,310 | $1,215 | $1,028 |
-| Maximum drawdown | −36.7% | −35.0% | −38.4% | **−33.9%** | −38.3% |
-| VaR breaches (expected ≈ 21) | 37† | 39† | 25 | 33† | 28 |
-| **Risk-adjusted** | | | | | |
-| Sharpe ratio (rf = 0) | **0.85** | 0.82 | 0.75 | 0.69 | 0.42 |
-| Return ÷ average VaR | **6.19** | 5.75 | 4.98 | 4.69 | 2.27 |
+| $10,000 invested 2018–2025 | Dynamic (DCC) | Dynamic (rolling corr.) | Static | 100% NIFTY 50 | 100% S&P 500 | 100% Euro Stoxx 50 |
+|:--|--:|--:|--:|--:|--:|--:|
+| **Return** | | | | | | |
+| Final value | $24,766 | $24,861 | $25,339 | $24,813 | **$25,604** | $16,542 |
+| Annualised return | 11.7% | 11.7% | 12.0% | 11.7% | **12.1%** | 6.3% |
+| Worst calendar year | −5.3% | −5.5% | −11.9% | **+3.2%** | −19.4% | −14.8% |
+| **Risk** | | | | | | |
+| Average forecast 99% VaR | 1.91% | **1.89%** | 2.08% | 2.34% | 2.58% | 2.78% |
+| Actual worst 1% of days | **2.47%** | **2.47%** | 2.56% | 2.67% | 3.41% | 3.64% |
+| Annualised volatility | **14.3%** | **14.3%** | 15.2% | 16.6% | 19.3% | 18.6% |
+| Worst single day | **$853** | $861 | $1,049 | $1,310 | $1,215 | $1,028 |
+| Maximum drawdown | −36.9% | −36.7% | −35.0% | −38.4% | **−33.9%** | −38.3% |
+| VaR breaches (expected ≈ 21) | 33† | 37† | 39† | 25 | 33† | 28 |
+| Christoffersen p (clustering) | 0.11 | 0.03‡ | 0.21 | 0.44 | 0.11 | 0.38 |
+| **Risk-adjusted** | | | | | | |
+| Sharpe ratio (rf = 0) | 0.84 | **0.85** | 0.82 | 0.75 | 0.69 | 0.42 |
 
-<sub>Bold marks the best value in each row. † means the Kupiec test rejects the VaR at the 5% level.</sub>
+<sub>Bold marks the best value in each row. † means the Kupiec test rejects the breach count at the 5% level. ‡ means the breaches are significantly clustered.</sub>
 
 ### Findings
 
-- **Lower risk.** Compared with the static portfolio, dynamic reallocation cut average VaR by 9%, volatility by 6% and the worst single day by 18%. It was the lowest-risk strategy on every measure except maximum drawdown.
-- **The biggest gain came in 2022.** The dynamic portfolio lost 5.5% that year, against 11.9% for the static portfolio and 19.4% for the S&P 500, as it moved weight away from US equities while their volatility rose.
-- **A small cost in return.** It returned 11.7% a year against 12.0% for the static portfolio, still far above the 8% target. The cost is about 0.26 percentage points a year, mainly from holding less of the S&P 500, which turned out to be the best performer.
-- **The best risk-adjusted result of the five strategies,** with a Sharpe ratio of 0.85 and return per unit of VaR of 6.2.
-- **Drawdown was not improved.** Monthly rebalancing cannot react within the few weeks of a crash like March 2020.
-- **The infeasible-target rule matters in a crash.** In April 2020 the `max_return` rule held 100% NIFTY 50 (planned VaR 13.5%). `min_var` would have spread the money across all three (planned VaR 9.1%) but missed part of the rebound, ending at $23,812.
+- **Lower risk than static.** Dynamic reallocation cut volatility by 6%, average VaR by about 8% and the worst single day by 19%.
+- **The biggest gain came in 2022.** The dynamic portfolio lost 5.3% that year, against 11.9% for the static portfolio and 19.4% for the S&P 500. Its average S&P weight fell from 54% in 2021 to 29%.
+- **A small cost in return:** about 0.3 percentage points a year against the static portfolio, still far above the 8% target.
+- **DCC improves risk *measurement*, not the *allocation*.**
+  - With DCC, VaR breaches fell from 37 to 33 and are no longer clustered (Christoffersen p = 0.11, up from 0.03).
+  - The weights and returns are essentially unchanged. Correlation shocks have a half-life of about 13 trading days, so the forecast averaged over a month is close to the long-run correlation.
+- **Drawdown was not improved.** Monthly rebalancing cannot react within a crash like March 2020.
 
 ### Sensitivity
 
 | 8% target | Final value | Annualised return | Average VaR | Sharpe | Target unreachable |
 |:--|--:|--:|--:|--:|--:|
 | Static | $25,339 | 11.97% | 2.08% | 0.82 | – |
-| Weekly rebalancing | $23,483 | 10.94% | 1.85% | 0.78 | 7 weeks |
-| **Monthly rebalancing** | $24,861 | 11.71% | 1.89% | **0.85** | 1 month |
-| Quarterly rebalancing | $24,836 | 11.69% | 1.98% | 0.82 | 1 quarter |
+| Weekly rebalancing | $23,633 | 11.02% | 1.86% | 0.79 | 7 weeks |
+| **Monthly rebalancing** | $24,766 | 11.66% | 1.91% | **0.84** | 1 month |
+| Quarterly rebalancing | $24,787 | 11.67% | 2.00% | 0.81 | 1 quarter |
 
-- **Monthly is the best frequency.** Weekly rebalancing reacts to noise.
-- **A 10% target** is unreachable in 16 of 96 months, because only the NIFTY's expected return exceeds 10%, and the risk advantage largely disappears.
-- **Transaction costs** of 10 bps per trade reduce the final value to $23,944 (11.2% a year). The Sharpe ratio falls to 0.82, the same as the static portfolio. After realistic costs, the benefit of rebalancing is lower risk rather than better risk-adjusted return.
+- **Trading costs** of 10 bps per trade reduce the final value to $23,832 (11.1% a year) and the Sharpe ratio to 0.81, just below the static portfolio's.
+- **A 10% target** is unreachable in 16 of 96 months.
 
 ### Calibration caveat
 
-The volatility forecast is accurate (standardised returns have a standard deviation of 1.00), but the tail is understated by about 15%. This gives 37 VaR breaches against about 21 expected, slightly clustered (Christoffersen p = 0.03). The causes and remedies are the same as in Stage 3: a fatter-tailed or filtered-historical-simulation portfolio quantile, and DCC correlations that rise in a crisis.
+The volatility forecast is accurate (standardised returns have a standard deviation of 0.99). The t tail still understates the worst days by about 12%, so the breach count is too high (Kupiec p = 0.013). The fix is a filtered-historical-simulation tail, tested below.
+
+---
+
+## Validation: Is the Strategy Viable?
+
+**Notebook:** [`validation.ipynb`](validation.ipynb)
+
+Stages 3 and 5 compared the portfolios only with single indices, over one test period. This notebook applies four stricter tests to **both the dynamic and the static** strategies. It runs every strategy **monthly from January 2011 to December 2025** with **10 bps trading costs**, and judges risk mainly with model-free measures (realised volatility, Expected Shortfall and drawdown).
+
+| Test | Method |
+|:--|:--|
+| 1. Stronger benchmarks | equal weight, inverse volatility (60 days), sample minimum variance, and **sample min-VaR**: the same optimiser and target as the dynamic strategy, but with a 500-day sample covariance instead of GARCH |
+| 2. Calibrated tail | three VaR models for every strategy: t with rolling correlation, t with **DCC** correlation, and **filtered historical simulation (FHS)**, which applies today's GARCH volatilities to the last 1,000 days of joint standardised residuals |
+| 3. Walk-forward | 13 rolling 3-year windows (2011–13 … 2023–25). Static GARCH is re-allocated at the start of each window |
+| 4. Significance | paired circular block bootstrap (2,000 replications, 20-day blocks) of the differences in volatility, ES, Sharpe ratio and return |
+
+Running Dynamic GARCH (t) from 2018 with zero costs reproduces the rolling-correlation Stage 5 result exactly ($24,861).
+
+### Results, 2011–2025 (10 bps costs)
+
+| | Dyn. GARCH (t) | Dyn. GARCH-DCC | Dyn. GARCH (FHS) | Sample min-VaR | Sample min-var. | Inverse vol. | Equal weight | **Static GARCH** | 100% S&P 500 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Annualised return | 10.0% | 9.9% | 9.8% | 10.1% | 10.0% | 9.1% | 9.1% | 10.7% | **11.6%** |
+| Volatility | 13.9% | 13.9% | 14.0% | 13.9% | **13.0%** | 13.4% | 13.7% | 13.1% | 17.1% |
+| ES 1% | 3.56% | 3.56% | 3.60% | 3.63% | 3.60% | 3.65% | 3.72% | **3.49%** | 4.47% |
+| Max drawdown | −36.8% | −37.0% | −37.4% | −36.1% | −36.0% | −35.8% | −35.6% | −35.7% | **−33.9%** |
+| Sharpe | 0.76 | 0.75 | 0.74 | 0.76 | 0.80 | 0.72 | 0.70 | **0.84** | 0.73 |
+| Final value | $43,351 | $42,884 | $42,196 | $43,675 | $43,147 | $38,272 | $38,022 | **$47,762** | $54,431 |
+| Trading costs | $1,194 | $1,202 | $1,056 | $296 | $165 | $269 | $60 | $0 | $0 |
+
+**VaR calibration across all 11 strategies**
+
+| Tail model | Strategies passing Kupiec and Christoffersen | Average breach rate (target 1%) |
+|:--|--:|--:|
+| t, rolling correlation | 3 | 1.24% |
+| t, DCC correlation | 4 | 1.19% |
+| FHS | 4 | **1.03%** |
+
+### Findings: dynamic strategy
+
+- **Diversification works, robustly and significantly.** Every diversified strategy had far less risk than any single market (bootstrap p ≤ 0.001).
+- **GARCH-based monthly re-optimisation adds nothing over simple rules.**
+  - Fed a plain sample covariance, the same optimiser reached the same risk at a third of the turnover.
+  - Sample minimum variance and Static GARCH both had **significantly lower** volatility than every dynamic version.
+  - No Sharpe difference between the diversified strategies is significant.
+- **DCC does not change the allocation result.** Dynamic GARCH-DCC is statistically indistinguishable from Dynamic GARCH (t).
+- **DCC improves the VaR for every rebalanced portfolio.** For example, Dynamic GARCH (t) breaches fall from 57 to 53, and equal weight passes both tests under DCC.
+- **FHS gives the best breach rate overall.** Dynamic GARCH (FHS) passes both tests (Kupiec p = 0.08, Christoffersen p = 0.25).
+
+### Findings: static strategy
+
+The static portfolio (Stage 3: one allocation, then buy and hold) holds up better than the dynamic one under the same tests:
+
+| Test | Static GARCH |
+|:--|:--|
+| Benchmarks | Lowest ES, highest Sharpe and highest final value of any diversified strategy. Its volatility is statistically tied with the best (sample min-variance). It has no trading costs. |
+| Calibration | The **only** portfolio strategy whose VaR passes both tests under all three tail models: 38–40 breaches against 38.8 expected. |
+| Walk-forward | Lower volatility than 100% NIFTY in 92% of windows and than 100% S&P in 85%. Higher return than equal weight in **every** window and higher Sharpe in 77%. But it had lower volatility than sample min-variance in only 8% of windows and than equal weight in 46%. |
+| Significance | Volatility significantly lower than every dynamic version, sample min-VaR and equal weight. ES significantly lower than equal weight. |
+
+- **Why it works.** Its value comes from one structural decision, not from timing. The Euro Stoxx 50 gets **0% at every window start**, because it has the highest volatility, the lowest expected return and a 0.6 correlation with the S&P 500. The money goes into the NIFTY 50 and the S&P 500, which have the lowest correlation of any pair (about 0.24).
+- **Where it is fragile.** The NIFTY/S&P split depends on the start date: from 24% to 100% NIFTY, driven by noisy expected-return estimates. When the target could not be reached (the 2012–14 window), it fell back to 100% NIFTY with 15.2% volatility. In practice it needs a cap on any single market, or an annual review.
+
+### Conclusion
+
+> A diversified minimum-risk allocation across the NIFTY 50, S&P 500 and Euro Stoxx 50 is a **viable** strategy. Its risk reduction against any single market is large, statistically significant and consistent across periods.
+>
+> The best construction tested is the **static** GARCH allocation, or a plain sample minimum-variance portfolio. Each matched or beat the monthly dynamic strategies on risk and risk-adjusted return with little or no trading, and the static portfolio's VaR is the best calibrated of all.
+>
+> GARCH and DCC earn their place in **risk measurement**: daily VaR that reacts to volatility and correlation spikes without clustered breaches. A filtered-historical-simulation tail brings the breach rate to target.
+
+**Caveats.**
+- The walk-forward windows overlap.
+- Many comparisons were run, so some significant results may arise by chance.
+- The evaluation starts in 2011.
+- The static strategy's 15-year result rests on one allocation made in December 2010, which is why its walk-forward re-allocation matters.
 
 ---
 
@@ -402,7 +496,7 @@ pip install numpy pandas scipy matplotlib statsmodels arch yfinance jupyter
 jupyter notebook
 ```
 
-Run the three index notebooks first, then `yoy-returns.ipynb`, `portoflio.ipynb` and `dynamic-portfolio.ipynb`, which read their cached price files. The dynamic notebook takes about 2–3 minutes, because it refits the models at every rebalance. On its first run each notebook downloads prices from Yahoo Finance and saves them to `data/<index>_daily.csv`. Later runs read that file and work offline. Delete it to fetch fresh data.
+Run the three index notebooks first, then `yoy-returns.ipynb`, `portoflio.ipynb`, `dynamic-portfolio.ipynb` and `validation.ipynb`, which read their cached price files. The dynamic notebook takes about 2–3 minutes, because it refits the models at every rebalance. On its first run each notebook downloads prices from Yahoo Finance and saves them to `data/<index>_daily.csv`. Later runs read that file and work offline. Delete it to fetch fresh data.
 
 ### Repository structure
 
@@ -414,7 +508,8 @@ Run the three index notebooks first, then `yoy-returns.ipynb`, `portoflio.ipynb`
 ├── eurostoxx50.ipynb                      # Stage 1: Euro Stoxx 50 GARCH + VaR
 ├── yoy-returns.ipynb                      # year-on-year returns vs VaR, correlation tests
 ├── portoflio.ipynb                        # Stage 3: $10,000 minimum-VaR portfolio vs single indices
-├── dynamic-portfolio.ipynb                # Stage 5: monthly re-optimised minimum-VaR portfolio
+├── dynamic-portfolio.ipynb                # Stage 5: monthly re-optimised minimum-VaR portfolio (DCC-GARCH)
+├── validation.ipynb                       # benchmarks, FHS VaR, walk-forward and bootstrap tests
 ├── data/
 │   ├── nifty50_daily.csv                  # cached closing prices (^NSEI)
 │   ├── sp500_daily.csv                    # cached closing prices (^GSPC)
@@ -449,3 +544,6 @@ Run the three index notebooks first, then `yoy-returns.ipynb`, `portoflio.ipynb`
 - Glosten, L. R., Jagannathan, R., & Runkle, D. E. (1993). On the relation between the expected value and the volatility of the nominal excess return on stocks. *Journal of Finance*, 48(5), 1779–1801.
 - Kupiec, P. H. (1995). Techniques for verifying the accuracy of risk measurement models. *Journal of Derivatives*, 3(2), 73–84.
 - Christoffersen, P. F. (1998). Evaluating interval forecasts. *International Economic Review*, 39(4), 841–862.
+- Engle, R. F. (2002). Dynamic conditional correlation: A simple class of multivariate GARCH models. *Journal of Business & Economic Statistics*, 20(3), 339–350.
+- Engle, R. F., & Sheppard, K. (2001). Theoretical and empirical properties of dynamic conditional correlation multivariate GARCH. NBER Working Paper 8554.
+- Ledoit, O., & Wolf, M. (2008). Robust performance hypothesis testing with the Sharpe ratio. *Journal of Empirical Finance*, 15(5), 850–859.
